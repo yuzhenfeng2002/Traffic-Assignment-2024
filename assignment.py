@@ -2,6 +2,7 @@ import math
 import time
 import heapq
 import networkx as nx
+import numpy as np
 
 from scipy.optimize import fsolve
 import warnings
@@ -181,6 +182,16 @@ def constantCostFunction(optimal: bool,
         return fft + flow
     return fft
 
+def BPRcostFunctionDerivative(optimal: bool,
+                    fft: float,
+                    alpha: float,
+                    flow: float,
+                    capacity: float,
+                    beta: float,
+                    length: float,
+                    maxSpeed: float
+                    ) -> float:
+    return fft * alpha * beta * math.pow((flow * 1.0 / capacity), beta - 1) / capacity
 
 def greenshieldsCostFunction(optimal: bool,
                              fft: float,
@@ -355,6 +366,34 @@ def get_TSTT(network: FlowTransportNetwork, costFunction=BPRcostFunction, use_ma
                       network.linkSet]), 9)
     return TSTT
 
+def calculate_conjugate_beta(network: FlowTransportNetwork, d_FW, d_bar, optimal: bool = False):
+    beta_numerator = np.sum([d_bar[l] * d_FW[l] * BPRcostFunctionDerivative(
+        optimal,
+        network.linkSet[l].fft,
+        network.linkSet[l].alpha,
+        network.linkSet[l].flow,
+        network.linkSet[l].capacity,
+        network.linkSet[l].beta,
+        network.linkSet[l].length,
+        network.linkSet[l].speedLimit) for l in network.linkSet])
+    beta_denominator = np.sum([d_bar[l] * (d_FW[l] - d_bar[l]) * BPRcostFunctionDerivative(
+        optimal,
+        network.linkSet[l].fft,
+        network.linkSet[l].alpha,
+        network.linkSet[l].flow,
+        network.linkSet[l].capacity,
+        network.linkSet[l].beta,
+        network.linkSet[l].length,
+        network.linkSet[l].speedLimit) for l in network.linkSet])
+    if beta_denominator == 0:
+        beta = 0
+    else:
+        beta = beta_numerator / beta_denominator
+        if beta > 1 - 1e-9:
+            beta = 1 - 1e-9
+        elif beta < 0:
+            beta = 0
+    return beta
 
 def assignment_loop(network: FlowTransportNetwork,
                     algorithm: str = "FW",
@@ -363,7 +402,8 @@ def assignment_loop(network: FlowTransportNetwork,
                     accuracy: float = 0.001,
                     maxIter: int = 1000,
                     maxTime: int = 60,
-                    verbose: bool = True):
+                    verbose: bool = True,
+                    output_file: str = None):
     """
     For explaination of the algorithm see Chapter 7 of:
     https://sboyles.github.io/blubook.html
@@ -374,6 +414,7 @@ def assignment_loop(network: FlowTransportNetwork,
 
     iteration_number = 1
     gap = np.inf
+    gaps = []
     TSTT = np.inf
     assignmentStartTime = time.time()
 
@@ -383,9 +424,19 @@ def assignment_loop(network: FlowTransportNetwork,
         # Get x_bar throug all-or-nothing assignment
         _, x_bar = loadAON(network=network)
 
+        if algorithm == "CFW":
+            d_FW = {l: x_bar[l] - network.linkSet[l].flow for l in network.linkSet}
+            if iteration_number == 1:
+                d_CFW = d_FW
+            else:
+                d_bar = {l: (1 - alpha) * d_CFW[l] for l in network.linkSet}
+                beta = calculate_conjugate_beta(network, d_FW, d_bar, systemOptimal)
+                d_CFW = {l: d_FW[l] + beta * (d_bar[l] - d_FW[l]) for l in network.linkSet}
+                x_bar = {l: d_CFW[l] + network.linkSet[l].flow for l in network.linkSet}
+
         if algorithm == "MSA" or iteration_number == 1:
-            alpha = (1 / iteration_number)
-        elif algorithm == "FW":
+            alpha = (2 / (iteration_number + 1))
+        elif algorithm in ["FW", "CFW"]:
             # If using Frank-Wolfe determine the step size alpha by solving a nonlinear equation
             alpha = findAlpha(x_bar,
                               network=network,
@@ -394,7 +445,7 @@ def assignment_loop(network: FlowTransportNetwork,
         else:
             print("Terminating the program.....")
             print("The solution algorithm ", algorithm, " does not exist!")
-            raise TypeError('Algorithm must be MSA or FW')
+            raise TypeError('Algorithm must be MSA, FW or CFW')
 
         # Apply flow improvement
         for l in network.linkSet:
@@ -413,6 +464,7 @@ def assignment_loop(network: FlowTransportNetwork,
 
         # print(TSTT, SPTT, "TSTT, SPTT, Max capacity", max([l.capacity for l in network.linkSet.values()]))
         gap = (TSTT / SPTT) - 1
+        gaps.append(gap)
         if gap < 0:
             print("Error, gap is less than 0, this should not happen")
             print("TSTT", "SPTT", TSTT, SPTT)
@@ -432,19 +484,22 @@ def assignment_loop(network: FlowTransportNetwork,
                     "The assignment did not converge to the desired gap and the max number of iterations has been reached")
                 print("Assignment took", round(time.time() - assignmentStartTime, 5), "seconds")
                 print("Current gap:", round(gap, 5))
-            return TSTT
+            verbose = False
+            break
         if time.time() - assignmentStartTime > maxTime:
             if verbose:
                 print("The assignment did not converge to the desired gap and the max time limit has been reached")
                 print("Assignment did ", iteration_number, "iterations")
                 print("Current gap:", round(gap, 5))
-            return TSTT
+            verbose = False
+            break
 
     if verbose:
         print("Assignment converged in ", iteration_number, "iterations")
         print("Assignment took", round(time.time() - assignmentStartTime, 5), "seconds")
         print("Current gap:", round(gap, 5))
-
+    if output_file is not None:
+        np.savetxt(f"./iteration_gaps/{output_file}", np.array(gaps), fmt="%.9f")
     return TSTT
 
 
@@ -548,15 +603,16 @@ def computeAssingment(net_file: str,
            by default the result file is saved with the same name as the input network with the suffix "_flow.tntp" in the same folder
     :param force_net_reprocess: True if the network files should be reprocessed from the tntp sources
     :param verbose: print useful info in standard output
-    :return: Totoal system travel time
+    :return: Total system travel time
     """
 
     network = load_network(net_file=net_file, demand_file=demand_file, verbose=verbose, force_net_reprocess=force_net_reprocess)
 
+    iteration_gaps_file = '_'.join(net_file.split("/")[-1].split("_")[:-1] + [algorithm] + ["gaps.csv"])
     if verbose:
         print("Computing assignment...")
     TSTT = assignment_loop(network=network, algorithm=algorithm, systemOptimal=systemOptimal, costFunction=costFunction,
-                           accuracy=accuracy, maxIter=maxIter, maxTime=maxTime, verbose=verbose)
+                           accuracy=accuracy, maxIter=maxIter, maxTime=maxTime, verbose=verbose, output_file=iteration_gaps_file)
 
     if results_file is None:
         results_file = '_'.join(net_file.split("_")[:-1] + ["flow.tntp"])
