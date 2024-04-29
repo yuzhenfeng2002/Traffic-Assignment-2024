@@ -632,22 +632,31 @@ if __name__ == '__main__':
 
     net_file = str(PathUtils.sioux_falls_net_file)
 
-    total_system_travel_time_optimal = computeAssingment(net_file=net_file,
-                                                         algorithm="FW",
-                                                         costFunction=BPRcostFunction,
-                                                         systemOptimal=True,
-                                                         verbose=True,
-                                                         accuracy=0.00001,
-                                                         maxIter=1000,
-                                                         maxTime=6000000)
-
-    total_system_travel_time_equilibrium = computeAssingment(net_file=net_file,
+    total_system_travel_time_equilibrium_FW = computeAssingment(net_file=net_file,
                                                              algorithm="FW",
                                                              costFunction=BPRcostFunction,
                                                              systemOptimal=False,
                                                              verbose=True,
-                                                             accuracy=0.001,
-                                                             maxIter=1000,
-                                                             maxTime=6000000)
+                                                             accuracy=0.000001,
+                                                             maxIter=2000,
+                                                             maxTime=600)
+    total_system_travel_time_equilibrium_CFW = computeAssingment(net_file=net_file,
+                                                                algorithm="CFW",
+                                                                costFunction=BPRcostFunction,
+                                                                systemOptimal=False,
+                                                                verbose=True,
+                                                                accuracy=0.000001,
+                                                                maxIter=2000,
+                                                                maxTime=600)
+    total_system_travel_time_equilibrium_MSA = computeAssingment(net_file=net_file,
+                                                                algorithm="MSA",
+                                                                costFunction=BPRcostFunction,
+                                                                systemOptimal=False,
+                                                                verbose=True,
+                                                                accuracy=0.000001,
+                                                                maxIter=2000,
+                                                                maxTime=600)
 
-    print("UE - SO = ", total_system_travel_time_equilibrium - total_system_travel_time_optimal)
+
+    print("CFW - FW = ", total_system_travel_time_equilibrium_CFW - total_system_travel_time_equilibrium_FW)
+    print("MSA - FW = ", total_system_travel_time_equilibrium_MSA - total_system_travel_time_equilibrium_FW)
