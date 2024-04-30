@@ -4,7 +4,7 @@ import heapq
 import networkx as nx
 import numpy as np
 
-from scipy.optimize import fsolve
+from scipy.optimize import fsolve, minimize
 import warnings
 
 from network_import import *
@@ -183,15 +183,26 @@ def constantCostFunction(optimal: bool,
     return fft
 
 def BPRcostFunctionDerivative(optimal: bool,
-                    fft: float,
-                    alpha: float,
-                    flow: float,
-                    capacity: float,
-                    beta: float,
-                    length: float,
-                    maxSpeed: float
-                    ) -> float:
+                              fft: float,
+                              alpha: float,
+                              flow: float,
+                              capacity: float,
+                              beta: float,
+                              length: float,
+                              maxSpeed: float
+                              ) -> float:
     return fft * alpha * beta * math.pow((flow * 1.0 / capacity), beta - 1) / capacity
+
+def BPRcostFunctionIntegral(optimal: bool,
+                            fft: float,
+                            alpha: float,
+                            flow: float,
+                            capacity: float,
+                            beta: float,
+                            length: float,
+                            maxSpeed: float
+                            ) -> float:
+    return fft * (flow + alpha * flow * math.pow((flow * 1.0 / capacity), beta) / (1 + beta))
 
 def greenshieldsCostFunction(optimal: bool,
                              fft: float,
@@ -231,25 +242,25 @@ def findAlpha(x_bar, network: FlowTransportNetwork, optimal: bool = False, costF
     for Frank-Wolfe Algorithm
     """
 
-    def df(alpha):
-        alpha = max(0, min(1, alpha))
-        sum_derivative = 0  # this line is the derivative of the objective function.
+    def sum(alpha):
+        # alpha = max(0, min(1, alpha))
+        sum_integral = 0  # this line is the derivative of the objective function.
         for l in network.linkSet:
             tmpFlow = alpha * x_bar[l] + (1 - alpha) * network.linkSet[l].flow
-            tmpCost = costFunction(optimal,
-                                   network.linkSet[l].fft,
-                                   network.linkSet[l].alpha,
-                                   tmpFlow,
-                                   network.linkSet[l].capacity,
-                                   network.linkSet[l].beta,
-                                   network.linkSet[l].length,
-                                   network.linkSet[l].speedLimit
-                                   )
-            sum_derivative = sum_derivative + (x_bar[l] - network.linkSet[l].flow) * tmpCost
-        return sum_derivative
+            tmpCost = BPRcostFunctionIntegral(optimal,
+                                              network.linkSet[l].fft,
+                                              network.linkSet[l].alpha,
+                                              tmpFlow,
+                                              network.linkSet[l].capacity,
+                                              network.linkSet[l].beta,
+                                              network.linkSet[l].length,
+                                              network.linkSet[l].speedLimit
+                                              )
+            sum_integral = sum_integral + tmpCost
+        return sum_integral
 
-    sol = fsolve(df, np.array([0.5]))
-    return max(0, min(1, sol[0]))
+    sol = minimize(sum, np.array([0.5]), tol=1e-10)
+    return max(0, min(1, sol.x[0]))
 
 
 def tracePreds(dest, network: FlowTransportNetwork):
