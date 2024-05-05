@@ -306,6 +306,7 @@ def readDemand(demand_df: pd.DataFrame, network: FlowTransportNetwork):
         term_node = str(int(row["term_node"]))
         demand = row["demand"]
 
+        if init_node == term_node or demand == 0: continue
         network.tripSet[init_node, term_node] = Demand(init_node, term_node, demand)
         if init_node not in network.zoneSet:
             network.zoneSet[init_node] = Zone(init_node)
@@ -513,6 +514,209 @@ def assignment_loop(network: FlowTransportNetwork,
         np.savetxt(f"./iteration_gaps/{output_file}", np.array(gaps), fmt="%.9f")
     return TSTT
 
+class Route:
+    def __init__(self):
+        self.r = -1
+        self.s = -1
+        self.cost = np.inf
+        self.links = []
+        self.flow = 0
+
+def cal_shortest_routes(network: FlowTransportNetwork):
+    """
+    This method calculates shortest route for all OD pairs.
+    """
+    shortest_routes = {}
+    for r in network.originZones:
+        DijkstraHeap(r, network=network)
+        for s in network.zoneSet[r].destList:
+            dem = network.tripSet[r, s].demand
+
+            if dem <= 0:
+                continue
+
+            route = Route()
+            route.r = r
+            route.s = s
+            route.cost = network.nodeSet[s].label
+            if r != s: route.links = tracePreds(s, network)
+
+            shortest_routes[(r, s)] = route
+
+    return shortest_routes
+
+def update_network_flow(network: FlowTransportNetwork, routes: dict):
+    network.reset_flow()
+    for OD, route_list in routes.items():
+        for route in route_list:
+            for link in route.links:
+                network.linkSet[link].flow += route.flow
+
+def update_routes_cost(network: FlowTransportNetwork, routes: dict):
+    for OD, route_list in routes.items():
+        for route in route_list:
+            route.cost = 0
+            for link in route.links:
+                route.cost += network.linkSet[link].cost
+
+def calculate_second_derivative(network: FlowTransportNetwork, route: Route, shortest_route: Route):
+    h = 0
+    route_set = set(route.links)
+    shortest_route_set = set(shortest_route.links)
+    link_set = route_set ^ shortest_route_set
+    for l in link_set:
+        link = network.linkSet[l]
+        h += BPRcostFunctionDerivative(
+            False,
+            network.linkSet[l].fft,
+            network.linkSet[l].alpha,
+            network.linkSet[l].flow,
+            network.linkSet[l].capacity,
+            network.linkSet[l].beta,
+            network.linkSet[l].length,
+            network.linkSet[l].speedLimit)
+    return h
+
+def findAlphaForNT(routes, shortest_routes, network: FlowTransportNetwork):
+    """
+    This uses unconstrained optimization to calculate the optimal step size required
+    for Newton Algorithm
+    """
+    def sum(alpha):
+        sum_integral = 0  # this line is the derivative of the objective function.
+        tmp_link_flow = {l: 0 for l in network.linkSet}
+        for OD, OD_routes in routes.items():
+            shortest_route = shortest_routes[OD]
+            flow_sum = 0
+            for route in OD_routes:
+                if len(set(route.links) ^ set(shortest_route.links)) == 0:
+                    shortest_route = route
+                else:
+                    h = calculate_second_derivative(network, route, shortest_route)
+                    if h == 0:
+                        tmp_route_flow = 0
+                    else:
+                        tmp_route_flow = max(0, route.flow - alpha * (route.cost - shortest_route.cost) / h)
+                    flow_sum += tmp_route_flow
+                    for link in route.links:
+                        tmp_link_flow[link] += tmp_route_flow
+            tmp_shortest_route_flow = network.tripSet[shortest_route.r, shortest_route.s].demand - flow_sum
+            for link in shortest_route.links:
+                tmp_link_flow[link] += tmp_shortest_route_flow
+        for l, tmpFlow in tmp_link_flow.items():
+            tmpCost = BPRcostFunctionIntegral(False,
+                                      network.linkSet[l].fft,
+                                      network.linkSet[l].alpha,
+                                      tmpFlow,
+                                      network.linkSet[l].capacity,
+                                      network.linkSet[l].beta,
+                                      network.linkSet[l].length,
+                                      network.linkSet[l].speedLimit
+                                      )
+            sum_integral = sum_integral + tmpCost
+        return sum_integral
+    sol = minimize(sum, x0=np.array([0.5]), tol=1e-10)
+    alpha = max(0, min(1, sol.x[0]))
+    if alpha == 0: alpha = 1e-2
+    return alpha
+
+def newton_method(network: FlowTransportNetwork,
+                    algorithm: str = "NT",
+                    systemOptimal: bool = False,
+                    costFunction=BPRcostFunction,
+                    accuracy: float = 0.001,
+                    maxIter: int = 1000,
+                    maxTime: int = 60,
+                    verbose: bool = True,
+                    output_file: str = None):
+    """
+    Ref: A Faster Path-Based Algorithm for Traffic Assignment
+    """
+    network.reset_flow()
+
+    iteration_number = 1
+    gap = np.inf
+    gaps = []
+    TSTT = np.inf
+    assignmentStartTime = time.time()
+    routes = {(r, s): [] for r in network.originZones for s in network.zoneSet[r].destList }
+
+    # Check if desired accuracy is reached
+    while gap > accuracy:
+        shortest_routes = cal_shortest_routes(network)
+        if iteration_number == 1:
+            for OD, route in shortest_routes.items():
+                route.flow = network.tripSet[route.r, route.s].demand
+                routes[OD].append(route)
+        else:
+            alpha = findAlphaForNT(routes, shortest_routes, network)
+            for OD, OD_routes in routes.items():
+                shortest_route = shortest_routes[OD]
+                is_append = True
+                flow_sum = 0
+                for route in OD_routes:
+                    if len(set(route.links) ^ set(shortest_route.links)) == 0:
+                        shortest_route = route
+                        is_append = False
+                    else:
+                        h = calculate_second_derivative(network, route, shortest_route)
+                        if h == 0: route.flow = 0
+                        else: route.flow = max(0, route.flow - alpha * (route.cost - shortest_route.cost) / h)
+                        flow_sum += route.flow
+                shortest_route.flow = network.tripSet[shortest_route.r, shortest_route.s].demand - flow_sum
+                if is_append: OD_routes.append(shortest_route)
+
+        # Compute the new travel time
+        update_network_flow(network, routes)
+        updateTravelTime(network=network, optimal=systemOptimal, costFunction=costFunction)
+        update_routes_cost(network, routes)
+
+        # Compute the relative gap
+        SPTT, _ = loadAON(network=network, computeXbar=False)
+        SPTT = round(SPTT, 9)
+        TSTT = round(sum([network.linkSet[a].flow * network.linkSet[a].cost for a in
+                          network.linkSet]), 9)
+
+        # print(TSTT, SPTT, "TSTT, SPTT, Max capacity", max([l.capacity for l in network.linkSet.values()]))
+        gap = (TSTT / SPTT) - 1
+        gaps.append(gap)
+        if gap < 0:
+            print("Error, gap is less than 0, this should not happen")
+            print("TSTT", "SPTT", TSTT, SPTT)
+
+            # Uncomment for debug
+
+            # print("Capacities:", [l.capacity for l in network.linkSet.values()])
+            # print("Flows:", [l.flow for l in network.linkSet.values()])
+
+        # Compute the real total travel time (which in the case of system optimal rounting is different from the TSTT above)
+        TSTT = get_TSTT(network=network, costFunction=costFunction)
+
+        iteration_number += 1
+        if iteration_number > maxIter:
+            if verbose:
+                print(
+                    "The assignment did not converge to the desired gap and the max number of iterations has been reached")
+                print("Assignment took", round(time.time() - assignmentStartTime, 5), "seconds")
+                print("Current gap:", round(gap, 5))
+            verbose = False
+            break
+        if time.time() - assignmentStartTime > maxTime:
+            if verbose:
+                print("The assignment did not converge to the desired gap and the max time limit has been reached")
+                print("Assignment did ", iteration_number, "iterations")
+                print("Current gap:", round(gap, 5))
+            verbose = False
+            break
+
+    if verbose:
+        print("Assignment converged in ", iteration_number, "iterations")
+        print("Assignment took", round(time.time() - assignmentStartTime, 5), "seconds")
+        print("Current gap:", round(gap, 5))
+    if output_file is not None:
+        np.savetxt(f"./iteration_gaps/{output_file}", np.array(gaps), fmt="%.9f")
+    return TSTT
+
 
 def writeResults(network: FlowTransportNetwork, output_file: str, costFunction=BPRcostFunction,
                  systemOptimal: bool = False, verbose: bool = True):
@@ -622,8 +826,12 @@ def computeAssingment(net_file: str,
     iteration_gaps_file = '_'.join(net_file.split("/")[-1].split("_")[:-1] + [algorithm] + ["gaps.csv"])
     if verbose:
         print("Computing assignment...")
-    TSTT = assignment_loop(network=network, algorithm=algorithm, systemOptimal=systemOptimal, costFunction=costFunction,
-                           accuracy=accuracy, maxIter=maxIter, maxTime=maxTime, verbose=verbose, output_file=iteration_gaps_file)
+    if algorithm in ["FW", "MSA", "CFW"]:
+        TSTT = assignment_loop(network=network, algorithm=algorithm, systemOptimal=systemOptimal, costFunction=costFunction,
+                               accuracy=accuracy, maxIter=maxIter, maxTime=maxTime, verbose=verbose, output_file=iteration_gaps_file)
+    elif algorithm == "NT":
+        TSTT = newton_method(network=network, algorithm=algorithm, systemOptimal=systemOptimal, costFunction=costFunction,
+                             accuracy=accuracy, maxIter=maxIter, maxTime=maxTime, verbose=verbose, output_file=iteration_gaps_file)
 
     if results_file is None:
         results_file = '_'.join(net_file.split("_")[:-1] + ["flow.tntp"])
@@ -644,13 +852,21 @@ if __name__ == '__main__':
     net_file = str(PathUtils.sioux_falls_net_file)
 
     total_system_travel_time_equilibrium_FW = computeAssingment(net_file=net_file,
-                                                             algorithm="FW",
-                                                             costFunction=BPRcostFunction,
-                                                             systemOptimal=False,
-                                                             verbose=True,
-                                                             accuracy=0.000001,
-                                                             maxIter=2000,
-                                                             maxTime=600)
+                                                                algorithm="FW",
+                                                                costFunction=BPRcostFunction,
+                                                                systemOptimal=False,
+                                                                verbose=True,
+                                                                accuracy=0.000001,
+                                                                maxIter=2000,
+                                                                maxTime=600)
+    total_system_travel_time_equilibrium_NT = computeAssingment(net_file=net_file,
+                                                                algorithm="NT",
+                                                                costFunction=BPRcostFunction,
+                                                                systemOptimal=False,
+                                                                verbose=True,
+                                                                accuracy=0.000001,
+                                                                maxIter=2000,
+                                                                maxTime=600)
     total_system_travel_time_equilibrium_CFW = computeAssingment(net_file=net_file,
                                                                 algorithm="CFW",
                                                                 costFunction=BPRcostFunction,
@@ -671,3 +887,4 @@ if __name__ == '__main__':
 
     print("CFW - FW = ", total_system_travel_time_equilibrium_CFW - total_system_travel_time_equilibrium_FW)
     print("MSA - FW = ", total_system_travel_time_equilibrium_MSA - total_system_travel_time_equilibrium_FW)
+    print("NT - FW = ", total_system_travel_time_equilibrium_NT - total_system_travel_time_equilibrium_FW)
