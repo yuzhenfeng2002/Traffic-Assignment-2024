@@ -1,33 +1,36 @@
-# Traffic-Assignment-Frank-Wolfe-2021
+# Traffic-Assignment-2024
 
-This simple script computes the traffic assignment using the **Frank-Wolfe algorithm (FW)** or the **Method of successive averages (MSA)**.
+Codes in this repository compute the traffic assignment using the algorithms of:
+- Frank-Wolfe Algorithm with Exact Line Search
+- Frank-Wolfe Algorithm with step size of (2 / (k + 2))
+- Conjugate Direction Frank-Wolfe Algorithm
+- Path-based Projection Gradient Algorithm with Exact Line Search
+- Path-based Projection Gradient Algorithm with fixed step size
 
-It can compute the **User Equilibrium (UE)** assignment or the **System Optimal (SO)** assignment.
+You can see the performance:
+![](gap_iteration)
+![](gap_time)
 
-The travel time cost function that models the effect of congestion on travel time is pluggable and definable by the users.
+You can see the references:
+- Jayakrishnan R, Tsai WT, Prashker JN, Rajadhyaksha S, 1994 A faster path-based algorithm for traffic assignment. Transportation Research Record .
+- LeBlanc LJ, Morlok EK, Pierskalla WP, 1975 An efficient approach to solving the road network equilibrium traffic assignment problem. Transportation research 9(5):309–318.
+- Mitradjieva M, Lindberg PO, 2013 The stiff is moving—conjugate direction frank-wolfe methods with applications to traffic assignment. Transportation Science 47(2):280–293.
 
-Currently, three cost function implementations are available:
-* BPR cost function ([see more](https://rdrr.io/rforge/travelr/man/bpr.function.html))
-* Greenshields cost function (see Greenshields, B. D., et al. "A study of traffic capacity." Highway research board proceedings. Vol. 1935. National Research Council (USA), Highway Research Board, 1935.)
-* Constant cost function (no congestion effects)
-
-Our implementation has been tested against all the networks for which a solution is available on [TransportationNetworks](https://github.com/bstabler/TransportationNetworks) and has always obtained the correct solution.
-
-# How to use
+## How to use
 
 First, clone the repository to a local directory.
 
 To use the algorithm, simply call the `computeAssingment()` method in the `assignment.py` script.
 
-The documentation of the method provides a through description of all the available parameters and their meaning.
+The example provides all the available parameters.
 
-# Importing networks
- Networks and demand files must be specified in the TNTP data format.
- 
- A through description of the TNTP format and a wide range of real transportation networks to test the algorithm on is avaialble at [TransportationNetworks](https://github.com/bstabler/TransportationNetworks).
+## Importing networks
 
+Networks and demand files must be specified in the TNTP data format.
  
- # Acknowledgments
+A detailed description of the TNTP format and a wide range of real transportation networks to test the algorithm on is avaialble at [TransportationNetworks](https://github.com/bstabler/TransportationNetworks).
+
+## Acknowledgments
  
-* This work is based on [Traffic-Assignment](https://github.com/prameshk/Traffic-Assignment). I focused on fixing this implementation and extending it to pluggable cost functions and user optimal flows.
+* This work is based on [Traffic-Assignment-Frank-Wolfe-2021](https://github.com/matteobettini/Traffic-Assignment-Frank-Wolfe-2021). I focused on fixing this implementation and extending it to implement more algorithms.
 * All the networks I used for testing the correctness of the algorithm are available at [TransportationNetworks](https://github.com/bstabler/TransportationNetworks).
