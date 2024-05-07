@@ -476,7 +476,8 @@ def assignment_loop(network: FlowTransportNetwork,
 
         # print(TSTT, SPTT, "TSTT, SPTT, Max capacity", max([l.capacity for l in network.linkSet.values()]))
         gap = (TSTT / SPTT) - 1
-        gaps.append(gap)
+        runTime = time.time() - assignmentStartTime
+        gaps.append([runTime, gap])
         if gap < 0:
             print("Error, gap is less than 0, this should not happen")
             print("TSTT", "SPTT", TSTT, SPTT)
@@ -577,29 +578,43 @@ def calculate_second_derivative(network: FlowTransportNetwork, route: Route, sho
             network.linkSet[l].speedLimit)
     return h
 
-def findAlphaForNT(routes, shortest_routes, network: FlowTransportNetwork):
+def obtain_step_direction(routes, shortest_routes, network: FlowTransportNetwork):
+    step_direction = {(OD, route_idx): 0 for OD, OD_routes in routes for route_idx in range(len(OD_routes))}
+    for OD, OD_routes in routes.items():
+        shortest_route = shortest_routes[OD]
+        route_idx = 0
+        for route in OD_routes:
+            if len(set(route.links) ^ set(shortest_route.links)) == 0:
+                shortest_route = route
+                step_direction[(OD, route_idx)] = 0
+            else:
+                h = calculate_second_derivative(network, route, shortest_route)
+                if h == 0:
+                    step_direction[(OD, route_idx)] = np.inf
+                else:
+                    step_direction[(OD, route_idx)] = (route.cost - shortest_route.cost) / h
+            route_idx += 1
+    return step_direction
+
+def exact_line_search_for_path_based_gp(routes, shortest_routes, network: FlowTransportNetwork):
     """
     This uses unconstrained optimization to calculate the optimal step size required
-    for Newton Algorithm
+    for GP Algorithm
     """
+    step_direction = obtain_step_direction(routes, shortest_routes, network)
     def sum(alpha):
         sum_integral = 0  # this line is the derivative of the objective function.
         tmp_link_flow = {l: 0 for l in network.linkSet}
         for OD, OD_routes in routes.items():
             shortest_route = shortest_routes[OD]
             flow_sum = 0
+            route_idx = 0
             for route in OD_routes:
-                if len(set(route.links) ^ set(shortest_route.links)) == 0:
-                    shortest_route = route
-                else:
-                    h = calculate_second_derivative(network, route, shortest_route)
-                    if h == 0:
-                        tmp_route_flow = 0
-                    else:
-                        tmp_route_flow = max(0, route.flow - alpha * (route.cost - shortest_route.cost) / h)
-                    flow_sum += tmp_route_flow
-                    for link in route.links:
-                        tmp_link_flow[link] += tmp_route_flow
+                tmp_route_flow = max(0, route.flow - alpha * step_direction[(OD, route_idx)])
+                flow_sum += tmp_route_flow
+                for link in route.links:
+                    tmp_link_flow[link] += tmp_route_flow
+                route_idx += 1
             tmp_shortest_route_flow = network.tripSet[shortest_route.r, shortest_route.s].demand - flow_sum
             for link in shortest_route.links:
                 tmp_link_flow[link] += tmp_shortest_route_flow
@@ -615,20 +630,21 @@ def findAlphaForNT(routes, shortest_routes, network: FlowTransportNetwork):
                                       )
             sum_integral = sum_integral + tmpCost
         return sum_integral
-    sol = minimize(sum, x0=np.array([0.5]), tol=1e-10)
+    sol = minimize(sum, x0=np.array([0.1]), tol=1e-3)
     alpha = max(0, min(1, sol.x[0]))
     if alpha == 0: alpha = 1e-2
-    return alpha
+    return alpha, step_direction
 
-def newton_method(network: FlowTransportNetwork,
-                    algorithm: str = "NT",
-                    systemOptimal: bool = False,
-                    costFunction=BPRcostFunction,
-                    accuracy: float = 0.001,
-                    maxIter: int = 1000,
-                    maxTime: int = 60,
-                    verbose: bool = True,
-                    output_file: str = None):
+def path_based_gp_method(network: FlowTransportNetwork,
+                         algorithm: str = "GP",
+                         systemOptimal: bool = False,
+                         costFunction=BPRcostFunction,
+                         accuracy: float = 0.001,
+                         maxIter: int = 1000,
+                         maxTime: int = 60,
+                         verbose: bool = True,
+                         output_file: str = None,
+                         step_size: float = 0.05):
     """
     Ref: A Faster Path-Based Algorithm for Traffic Assignment
     """
@@ -649,20 +665,24 @@ def newton_method(network: FlowTransportNetwork,
                 route.flow = network.tripSet[route.r, route.s].demand
                 routes[OD].append(route)
         else:
-            alpha = findAlphaForNT(routes, shortest_routes, network)
+            if algorithm == "GP-E":
+                alpha, step_direction = exact_line_search_for_path_based_gp(routes, shortest_routes, network)
+            else:
+                alpha = step_size
+                step_direction = obtain_step_direction(routes, shortest_routes, network)
             for OD, OD_routes in routes.items():
                 shortest_route = shortest_routes[OD]
                 is_append = True
                 flow_sum = 0
+                route_idx = 0
                 for route in OD_routes:
-                    if len(set(route.links) ^ set(shortest_route.links)) == 0:
+                    if step_direction[(OD, route_idx)] == 0:
                         shortest_route = route
                         is_append = False
                     else:
-                        h = calculate_second_derivative(network, route, shortest_route)
-                        if h == 0: route.flow = 0
-                        else: route.flow = max(0, route.flow - alpha * (route.cost - shortest_route.cost) / h)
+                        route.flow = max(0, route.flow - alpha * step_direction[(OD, route_idx)])
                         flow_sum += route.flow
+                    route_idx += 1
                 shortest_route.flow = network.tripSet[shortest_route.r, shortest_route.s].demand - flow_sum
                 if is_append: OD_routes.append(shortest_route)
 
@@ -679,7 +699,8 @@ def newton_method(network: FlowTransportNetwork,
 
         # print(TSTT, SPTT, "TSTT, SPTT, Max capacity", max([l.capacity for l in network.linkSet.values()]))
         gap = (TSTT / SPTT) - 1
-        gaps.append(gap)
+        runTime = time.time() - assignmentStartTime
+        gaps.append([runTime, gap])
         if gap < 0:
             print("Error, gap is less than 0, this should not happen")
             print("TSTT", "SPTT", TSTT, SPTT)
@@ -793,7 +814,8 @@ def computeAssingment(net_file: str,
                       maxTime: int = 60,
                       results_file: str = None,
                       force_net_reprocess: bool = False,
-                      verbose: bool = True
+                      verbose: bool = True,
+                      step_size = 0.05,
                       ) -> float:
     """
     This is the main function to compute the user equilibrium UE (default) or system optimal (SO) traffic assignment
@@ -829,9 +851,10 @@ def computeAssingment(net_file: str,
     if algorithm in ["FW", "MSA", "CFW"]:
         TSTT = assignment_loop(network=network, algorithm=algorithm, systemOptimal=systemOptimal, costFunction=costFunction,
                                accuracy=accuracy, maxIter=maxIter, maxTime=maxTime, verbose=verbose, output_file=iteration_gaps_file)
-    elif algorithm == "NT":
-        TSTT = newton_method(network=network, algorithm=algorithm, systemOptimal=systemOptimal, costFunction=costFunction,
-                             accuracy=accuracy, maxIter=maxIter, maxTime=maxTime, verbose=verbose, output_file=iteration_gaps_file)
+    elif algorithm in ["GP", "GP-E"]:
+        TSTT = path_based_gp_method(network=network, algorithm=algorithm, systemOptimal=systemOptimal, costFunction=costFunction,
+                                    accuracy=accuracy, maxIter=maxIter, maxTime=maxTime, verbose=verbose, output_file=iteration_gaps_file,
+                                    step_size=step_size)
 
     if results_file is None:
         results_file = '_'.join(net_file.split("_")[:-1] + ["flow.tntp"])
@@ -856,35 +879,45 @@ if __name__ == '__main__':
                                                                 costFunction=BPRcostFunction,
                                                                 systemOptimal=False,
                                                                 verbose=True,
-                                                                accuracy=0.000001,
-                                                                maxIter=2000,
-                                                                maxTime=600)
-    total_system_travel_time_equilibrium_NT = computeAssingment(net_file=net_file,
-                                                                algorithm="NT",
+                                                                accuracy=0.000000001,
+                                                                maxIter=20000,
+                                                                maxTime=100)
+    total_system_travel_time_equilibrium_GP = computeAssingment(net_file=net_file,
+                                                                algorithm="GP",
                                                                 costFunction=BPRcostFunction,
                                                                 systemOptimal=False,
                                                                 verbose=True,
-                                                                accuracy=0.000001,
-                                                                maxIter=2000,
-                                                                maxTime=600)
+                                                                accuracy=0.000000001,
+                                                                maxIter=20000,
+                                                                maxTime=100,
+                                                                step_size=0.05)
+    total_system_travel_time_equilibrium_GP_E = computeAssingment(net_file=net_file,
+                                                                algorithm="GP-E",
+                                                                costFunction=BPRcostFunction,
+                                                                systemOptimal=False,
+                                                                verbose=True,
+                                                                accuracy=0.000000001,
+                                                                maxIter=20000,
+                                                                maxTime=100)
     total_system_travel_time_equilibrium_CFW = computeAssingment(net_file=net_file,
                                                                 algorithm="CFW",
                                                                 costFunction=BPRcostFunction,
                                                                 systemOptimal=False,
                                                                 verbose=True,
-                                                                accuracy=0.000001,
-                                                                maxIter=2000,
-                                                                maxTime=600)
+                                                                accuracy=0.000000001,
+                                                                maxIter=20000,
+                                                                maxTime=100)
     total_system_travel_time_equilibrium_MSA = computeAssingment(net_file=net_file,
                                                                 algorithm="MSA",
                                                                 costFunction=BPRcostFunction,
                                                                 systemOptimal=False,
                                                                 verbose=True,
-                                                                accuracy=0.000001,
-                                                                maxIter=2000,
-                                                                maxTime=600)
+                                                                accuracy=0.000000001,
+                                                                maxIter=20000,
+                                                                maxTime=100)
 
 
     print("CFW - FW = ", total_system_travel_time_equilibrium_CFW - total_system_travel_time_equilibrium_FW)
     print("MSA - FW = ", total_system_travel_time_equilibrium_MSA - total_system_travel_time_equilibrium_FW)
-    print("NT - FW = ", total_system_travel_time_equilibrium_NT - total_system_travel_time_equilibrium_FW)
+    print("GP - FW = ", total_system_travel_time_equilibrium_GP - total_system_travel_time_equilibrium_FW)
+    print("GP-E - FW = ", total_system_travel_time_equilibrium_GP_E - total_system_travel_time_equilibrium_FW)
